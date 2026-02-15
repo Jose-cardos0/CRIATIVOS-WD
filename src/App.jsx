@@ -74,6 +74,7 @@ const LANGUAGES = [
 
 let nextId = 1;
 
+import logo from './assets/logo2.png';
 function App({ user, onLogout }) {
   // Config compartilhada
   const [mode, setMode] = useState('white');
@@ -284,13 +285,7 @@ function App({ user, onLogout }) {
       <header className="border-b border-dark-800/50">
         <div className="max-w-6xl mx-auto px-6 py-5 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg shadow-indigo-500/20">
-              <Icons.Waveform />
-            </div>
-            <div>
-              <h1 className="text-xl font-bold text-white tracking-tight">Criativos WD</h1>
-              <p className="text-xs text-dark-400">Phase Inverter + Audio White</p>
-            </div>
+            <img src={logo} alt="logo" className="w-10 object-contain" />
           </div>
           <div className="flex items-center gap-3 text-xs text-dark-400">
             {queue.length > 0 && pendingCount > 0 && <span className="bg-dark-800 px-2 py-1 rounded-lg">{pendingCount} na fila</span>}
@@ -308,28 +303,7 @@ function App({ user, onLogout }) {
       </header>
 
       <main className="max-w-6xl mx-auto px-6 py-8 space-y-6">
-        {/* Como funciona */}
-        <div className="glass-card gradient-border p-6">
-          <h2 className="text-sm font-semibold text-indigo-400 uppercase tracking-wider mb-3">Como funciona</h2>
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-            {[
-              { step: '1', title: 'Upload', desc: 'Envie um ou varios videos criativos de uma vez' },
-              { step: '2', title: 'Phase Split', desc: 'Audio original (MONO) no canal L, fase invertida no canal R. Bot soma L+R = silencio' },
-              { step: '3', title: 'Audio MID', desc: 'TTS ou Ruido no canal MID. Sobrevive na soma mono — bot transcreve apenas isso' },
-              { step: '4', title: 'Export', desc: 'Cada video processado fica disponivel para download individual' },
-            ].map((item) => (
-              <div key={item.step} className="flex gap-3">
-                <div className="flex-shrink-0 w-8 h-8 rounded-full bg-indigo-500/20 text-indigo-400 flex items-center justify-center text-sm font-bold">
-                  {item.step}
-                </div>
-                <div>
-                  <p className="text-sm font-semibold text-white">{item.title}</p>
-                  <p className="text-xs text-dark-400 mt-0.5">{item.desc}</p>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
+    
 
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
 
@@ -516,25 +490,16 @@ function App({ user, onLogout }) {
 
               {/* Info Phase */}
               <div className="bg-dark-900/50 rounded-lg p-3 border border-dark-700/30 space-y-2">
-                <div className="flex items-start gap-2">
-                  <Icons.Phase />
-                  <div>
-                    <p className="text-xs font-medium text-dark-300">Anti-Transcricao (Phase Split)</p>
-                    <p className="text-[10px] text-dark-500 mt-0.5">
-                      O audio original vai para o canal L (MONO) e a copia invertida para o canal R.
-                      Quando o bot soma para mono: L + R = silencio. Humanos ouvem normalmente em estereo.
-                    </p>
-                  </div>
-                </div>
+             
                 <div className="grid grid-cols-2 gap-1.5 text-[10px]">
                   <div className="bg-dark-800/50 rounded-lg p-2 border border-dark-700/30">
                     <p className="font-semibold text-indigo-400">Audio Principal</p>
-                    <p className="text-dark-400">MONO (L=orig, R=inv)</p>
+                    
                     <p className="text-dark-500">Volume: 100%</p>
                   </div>
                   <div className="bg-dark-800/50 rounded-lg p-2 border border-dark-700/30">
                     <p className="font-semibold text-purple-400">{mode === 'white' ? 'Copy White (TTS)' : 'Ruido (' + noiseTypes.join('+') + ')' + (noiseEffects.length > 0 ? ' +FX' : '')}</p>
-                    <p className="text-dark-400">ESTEREO (sobrevive mono)</p>
+                  
                     <p className="text-dark-500">Volume: {volume}%</p>
                   </div>
                 </div>
@@ -697,9 +662,9 @@ function App({ user, onLogout }) {
       </main>
 
       <footer className="border-t border-dark-800/50 mt-12">
-        <div className="max-w-6xl mx-auto px-6 py-4 text-center text-xs text-dark-500">
-          Criativos WD - Phase Inverter + Audio White Generator
-        </div>
+      <p className="text-center text-[10px] text-dark-600  py-4">
+          Desenvolvido por <a href="https://codenxt.online">@CODENXT</a>
+        </p>
       </footer>
     </div>
   );

@@ -2,6 +2,8 @@ import { useState } from 'react';
 import { auth } from './firebase';
 import { signInWithEmailAndPassword, sendPasswordResetEmail } from 'firebase/auth';
 
+import logo from './assets/logo2.png';
+
 export default function Login() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -55,25 +57,25 @@ export default function Login() {
     }
   };
 
+  
+
   return (
     <div className="min-h-screen bg-dark-950 flex items-center justify-center px-4">
       <div className="w-full max-w-md">
         {/* Logo */}
         <div className="text-center mb-8">
-          <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shadow-lg shadow-indigo-500/20 mx-auto mb-4">
-            <svg className="w-8 h-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M3 12h1.5m0 0V8.25m0 3.75v3.75M6 12h1.5m0 0V6m0 6v6m3-6h1.5m0 0V9m0 3v3m3-3h1.5m0 0V7.5m0 4.5v4.5m3-4.5h1.5m0 0V9.75m0 2.25v2.25M21 12h1.5" />
-            </svg>
+          <div className="w-32 mx-auto mb-4">
+            <img src={logo} alt="logo" className="w-full h-full object-contain" />
           </div>
-          <h1 className="text-2xl font-bold text-white tracking-tight">Criativos WD</h1>
-          <p className="text-sm text-dark-400 mt-1">Phase Inverter + Audio White</p>
+     
+        
         </div>
 
         {/* Card de login */}
         <div className="glass-card p-8">
           {!showReset ? (
             <>
-              <h2 className="text-lg font-semibold text-white mb-6 text-center">Entrar</h2>
+             
 
               <form onSubmit={handleLogin} className="space-y-4">
                 <div className="space-y-1.5">
@@ -212,7 +214,7 @@ export default function Login() {
         </div>
 
         <p className="text-center text-[10px] text-dark-600 mt-6">
-          Criativos WD - Phase Inverter + Audio White Generator
+          Desenvolvido por <a href="https://codenxt.online">@CODENXT</a>
         </p>
       </div>
     </div>
