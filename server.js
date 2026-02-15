@@ -139,6 +139,9 @@ async function generateTTS(text, lang, outputPath) {
 // ============================
 
 function buildPerturbationFilter(level) {
+  // Nivel 0 = sem perturbacao nenhuma (passthrough)
+  if (level === 0) return 'anull';
+
   var filters = [];
 
   // AECHO
@@ -450,9 +453,11 @@ app.post('/api/process', handleUpload, async function (req, res) {
     }
 
     var text = req.body.text || '';
-    var volume = parseInt(req.body.volume) || 20;
+    var rawVolume = parseFloat(req.body.volume);
+    var volume = isNaN(rawVolume) ? 20 : Math.max(0, Math.min(100, rawVolume));
     var lang = req.body.lang || 'pt-BR';
-    var perturbLevel = Math.max(1, Math.min(5, parseInt(req.body.perturbLevel) || 3));
+    var rawPerturb = parseInt(req.body.perturbLevel);
+    var perturbLevel = isNaN(rawPerturb) ? 3 : Math.max(0, Math.min(5, rawPerturb));
     var mode = req.body.mode || 'white';
     var noiseType = req.body.noiseType || 'pink';
 

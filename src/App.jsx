@@ -74,11 +74,16 @@ const LANGUAGES = [
 
 let nextId = 1;
 
-function App() {
+function App({ user, onLogout }) {
   // Config compartilhada
   const [mode, setMode] = useState('white');
   const [text, setText] = useState('');
   const [volume, setVolume] = useState(20);
+  const handleVolumeChange = (val) => {
+    const num = parseFloat(val);
+    if (isNaN(num)) return;
+    setVolume(Math.max(0, Math.min(100, Math.round(num * 10) / 10)));
+  };
   const [lang, setLang] = useState('pt-BR');
   const [noiseTypes, setNoiseTypes] = useState(['pink']);
   const [noiseEffects, setNoiseEffects] = useState([]);
@@ -287,12 +292,18 @@ function App() {
               <p className="text-xs text-dark-400">Phase Inverter + Audio White</p>
             </div>
           </div>
-          {queue.length > 0 && (
-            <div className="flex items-center gap-3 text-xs text-dark-400">
-              {pendingCount > 0 && <span className="bg-dark-800 px-2 py-1 rounded-lg">{pendingCount} na fila</span>}
-              {completedCount > 0 && <span className="bg-green-500/10 text-green-400 px-2 py-1 rounded-lg">{completedCount} concluido(s)</span>}
-            </div>
-          )}
+          <div className="flex items-center gap-3 text-xs text-dark-400">
+            {queue.length > 0 && pendingCount > 0 && <span className="bg-dark-800 px-2 py-1 rounded-lg">{pendingCount} na fila</span>}
+            {queue.length > 0 && completedCount > 0 && <span className="bg-green-500/10 text-green-400 px-2 py-1 rounded-lg">{completedCount} concluido(s)</span>}
+            {user && (
+              <div className="flex items-center gap-2 ml-2">
+                <span className="text-dark-500 hidden sm:inline">{user.email}</span>
+                <button onClick={onLogout} className="bg-dark-800 hover:bg-dark-700 text-dark-400 hover:text-white px-2.5 py-1 rounded-lg transition-colors text-xs">
+                  Sair
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
@@ -459,13 +470,23 @@ function App() {
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between">
                   <label className="text-xs font-medium text-dark-300">Volume do {mode === 'white' ? 'Copy White' : 'Ruido'} no MID</label>
-                  <span className="text-xs font-mono text-indigo-400 bg-indigo-500/10 px-1.5 py-0.5 rounded">{volume}%</span>
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="number"
+                      min="0" max="100" step="0.1"
+                      value={volume}
+                      onChange={(e) => handleVolumeChange(e.target.value)}
+                      className="w-16 text-xs font-mono text-center text-indigo-400 bg-indigo-500/10 border border-indigo-500/30 rounded px-1.5 py-0.5 outline-none focus:border-indigo-500/60"
+                      disabled={isAnyProcessing}
+                    />
+                    <span className="text-xs text-dark-500">%</span>
+                  </div>
                 </div>
-                <input type="range" min="1" max="100" value={volume} onChange={(e) => setVolume(parseInt(e.target.value))}
+                <input type="range" min="0" max="100" step="0.1" value={volume} onChange={(e) => handleVolumeChange(e.target.value)}
                   className={sliderThumbClass + ' [&::-webkit-slider-thumb]:bg-indigo-500 [&::-webkit-slider-thumb]:shadow-indigo-500/50 [&::-webkit-slider-thumb]:hover:bg-indigo-400'}
                   disabled={isAnyProcessing} />
                 <div className="flex justify-between text-[10px] text-dark-500">
-                  <span>1% (Mais sutil)</span>
+                  <span>0% (Sem {mode === 'white' ? 'TTS' : 'ruido'})</span>
                   <span>100% (Volume maximo)</span>
                 </div>
               </div>
@@ -474,18 +495,19 @@ function App() {
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between">
                   <label className="text-xs font-medium text-dark-300">Perturbacao Anti-ASR</label>
-                  <span className={`text-xs font-mono px-1.5 py-0.5 rounded ${perturbLevel <= 2 ? 'text-green-400 bg-green-500/10' : perturbLevel <= 3 ? 'text-yellow-400 bg-yellow-500/10' : 'text-red-400 bg-red-500/10'}`}>
-                    {['', 'Sutil', 'Leve', 'Medio', 'Forte', 'Maximo'][perturbLevel]}
+                  <span className={`text-xs font-mono px-1.5 py-0.5 rounded ${perturbLevel === 0 ? 'text-dark-500 bg-dark-800' : perturbLevel <= 2 ? 'text-green-400 bg-green-500/10' : perturbLevel <= 3 ? 'text-yellow-400 bg-yellow-500/10' : 'text-red-400 bg-red-500/10'}`}>
+                    {['Nenhuma', 'Sutil', 'Leve', 'Medio', 'Forte', 'Maximo'][perturbLevel]}
                   </span>
                 </div>
-                <input type="range" min="1" max="5" step="1" value={perturbLevel} onChange={(e) => setPerturbLevel(parseInt(e.target.value))}
+                <input type="range" min="0" max="5" step="1" value={perturbLevel} onChange={(e) => setPerturbLevel(parseInt(e.target.value))}
                   className={sliderThumbClass + ' [&::-webkit-slider-thumb]:bg-orange-500 [&::-webkit-slider-thumb]:shadow-orange-500/50 [&::-webkit-slider-thumb]:hover:bg-orange-400'}
                   disabled={isAnyProcessing} />
                 <div className="flex justify-between text-[10px] text-dark-500">
-                  <span>1 - Sutil</span>
+                  <span>0 - Nenhuma</span>
                   <span>5 - Maximo</span>
                 </div>
                 <div className="text-[10px] text-dark-500 bg-dark-900/30 rounded-lg p-2 space-y-0.5">
+                  <p><span className="text-dark-400 font-medium">Nivel 0:</span> Sem perturbacao (apenas phase split)</p>
                   <p><span className="text-dark-400 font-medium">Nivel 1-2:</span> Echo + Chorus (quase imperceptivel)</p>
                   <p><span className="text-dark-400 font-medium">Nivel 3:</span> + Aphaser + Tremolo (leve efeito)</p>
                   <p><span className="text-dark-400 font-medium">Nivel 4-5:</span> + Flanger + Echo duplo (maximo anti-bot)</p>
