@@ -8,9 +8,11 @@
     "dev:client": "vite",
     "dev:server": "node server.js",
     "build": "vite build",
-    "start": "node server.js"
+    "start": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
+    "start:server": "node server.js"
   },
   "dependencies": {
+    "archiver": "^7.0.1",
     "cors": "^2.8.5",
     "express": "^4.21.0",
     "ffmpeg-static": "^5.2.0",

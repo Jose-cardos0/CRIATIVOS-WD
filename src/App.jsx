@@ -79,16 +79,22 @@ function App({ user, onLogout }) {
   // Config compartilhada
   const [mode, setMode] = useState('white');
   const [text, setText] = useState('');
-  const [volume, setVolume] = useState(20);
-  const handleVolumeChange = (val) => {
-    const num = parseFloat(val);
-    if (isNaN(num)) return;
-    setVolume(Math.max(0, Math.min(100, Math.round(num * 10) / 10)));
-  };
   const [lang, setLang] = useState('pt-BR');
   const [noiseTypes, setNoiseTypes] = useState(['pink']);
   const [noiseEffects, setNoiseEffects] = useState([]);
+  const [customNoises, setCustomNoises] = useState([]);
+  const [selectedCustomNoise, setSelectedCustomNoise] = useState(null);
+  const [uploadingNoise, setUploadingNoise] = useState(false);
   const [perturbLevel, setPerturbLevel] = useState(3);
+  const noiseNameRef = useRef(null);
+
+  // Mixer: volumes individuais (0-500%)
+  const [mixer, setMixer] = useState({ volL: 100, volR: 100, volNoise: 20 });
+  const updateMixer = (key, val) => {
+    const num = parseFloat(val);
+    if (isNaN(num)) return;
+    setMixer(prev => ({ ...prev, [key]: Math.max(0, Math.min(500, Math.round(num * 10) / 10)) }));
+  };
 
   // Fila de videos: [{id, file, status, progress, message, jobId, downloadUrl, outputFile}]
   const [queue, setQueue] = useState([]);
@@ -98,6 +104,45 @@ function App({ user, onLogout }) {
   const fileInputRef = useRef(null);
   const processingRef = useRef(false);
   const pollingTimers = useRef({});
+
+  // Carregar ruidos customizados
+  const fetchCustomNoises = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_URL}/noises`);
+      if (res.ok) setCustomNoises(await res.json());
+    } catch (e) { /* ignore */ }
+  }, []);
+
+  useEffect(() => { fetchCustomNoises(); }, [fetchCustomNoises]);
+
+  const uploadCustomNoise = async (file, name) => {
+    setUploadingNoise(true);
+    try {
+      const formData = new FormData();
+      formData.append('audio', file);
+      if (name) formData.append('name', name);
+      const res = await fetch(`${API_URL}/noises`, { method: 'POST', body: formData });
+      if (!res.ok) {
+        const text = await res.text();
+        let msg = 'Erro no upload';
+        try { msg = JSON.parse(text).error || msg; } catch (_) { /* HTML response */ }
+        throw new Error(msg);
+      }
+      await fetchCustomNoises();
+    } catch (e) {
+      setGlobalError(e.message);
+    } finally {
+      setUploadingNoise(false);
+    }
+  };
+
+  const deleteCustomNoise = async (id) => {
+    try {
+      await fetch(`${API_URL}/noises/${id}`, { method: 'DELETE' });
+      if (selectedCustomNoise === id) setSelectedCustomNoise(null);
+      await fetchCustomNoises();
+    } catch (e) { /* ignore */ }
+  };
 
   // Limpar timers ao desmontar
   useEffect(() => {
@@ -157,13 +202,14 @@ function App({ user, onLogout }) {
     const formData = new FormData();
     formData.append('video', pendingItem.file);
     formData.append('mode', mode);
-    formData.append('volume', volume.toString());
+    formData.append('volume', '100');
     formData.append('perturbLevel', perturbLevel.toString());
+    formData.append('mixer', JSON.stringify(mixer));
     if (mode === 'white') {
       formData.append('text', text.trim());
       formData.append('lang', lang);
     } else {
-      formData.append('noiseType', JSON.stringify({ types: noiseTypes, effects: noiseEffects }));
+      formData.append('noiseType', JSON.stringify({ types: noiseTypes, effects: noiseEffects, customNoise: selectedCustomNoise }));
     }
 
     try {
@@ -204,6 +250,7 @@ function App({ user, onLogout }) {
             message: 'Concluido!',
             downloadUrl: data.downloadUrl,
             outputFile: data.outputFile,
+            originalName: data.originalName,
           });
           processingRef.current = false;
         } else if (data.status === 'error') {
@@ -229,7 +276,7 @@ function App({ user, onLogout }) {
     if (item.downloadUrl) {
       const a = document.createElement('a');
       a.href = item.downloadUrl;
-      a.download = item.outputFile || 'video_processado.mp4';
+      a.download = item.originalName || item.file?.name || 'video_processado.mp4';
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -245,9 +292,61 @@ function App({ user, onLogout }) {
     setQueue(prev => prev.filter(item => item.id !== id));
   };
 
+  // Selecao para download em lote
+  const [selectedIds, setSelectedIds] = useState(new Set());
+  const [downloadingZip, setDownloadingZip] = useState(false);
+
+  const completedItems = queue.filter(item => item.status === 'completed' && item.outputFile);
+
+  const toggleSelect = (id) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (selectedIds.size === completedItems.length) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(completedItems.map(i => i.id)));
+    }
+  };
+
+  const downloadZip = async () => {
+    const items = completedItems.filter(i => selectedIds.has(i.id));
+    if (items.length === 0) return;
+    setDownloadingZip(true);
+    try {
+      const files = items.map(i => ({
+        filename: i.outputFile,
+        downloadName: i.originalName || i.file?.name || i.outputFile
+      }));
+      const res = await fetch(`${API_URL}/download-zip`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ files })
+      });
+      if (!res.ok) throw new Error('Erro ao gerar ZIP');
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'criativos-wd.zip';
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      setGlobalError(e.message);
+    } finally {
+      setDownloadingZip(false);
+    }
+  };
+
   // Limpar finalizados
   const clearCompleted = () => {
     setQueue(prev => prev.filter(item => item.status !== 'completed' && item.status !== 'error'));
+    setSelectedIds(new Set());
   };
 
   // Drag & drop
@@ -349,13 +448,88 @@ function App({ user, onLogout }) {
                 </>
               )}
 
-              {/* Noise: tipos (multi-select) */}
+              {/* Noise: customizados + tipos (multi-select) */}
               {mode === 'noise' && (
                 <div className="space-y-3">
+                  {/* Ruidos customizados */}
                   <div className="space-y-1.5">
                     <div className="flex items-center justify-between">
-                      <label className="text-xs font-medium text-dark-300">Tipos de ruido</label>
-                      <span className="text-[10px] text-dark-500">Selecione 1 ou mais</span>
+                      <label className="text-xs font-medium text-dark-300">Meus ruidos</label>
+                      <span className="text-[10px] text-dark-500">Envie arquivos MP3/WAV/OGG</span>
+                    </div>
+
+                    {/* Upload */}
+                    <div className="flex gap-2 items-end">
+                      <div className="flex-1 space-y-1">
+                        <input
+                          ref={noiseNameRef}
+                          type="text"
+                          placeholder="Nome do ruido (opcional)"
+                          className="w-full text-xs bg-dark-800/50 border border-dark-700/30 rounded-lg px-3 py-1.5 text-dark-200 placeholder-dark-500 outline-none focus:border-indigo-500/50"
+                          disabled={uploadingNoise || isAnyProcessing}
+                        />
+                      </div>
+                      <label className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border cursor-pointer transition-all ${uploadingNoise ? 'opacity-50 pointer-events-none' : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/20'}`}>
+                        {uploadingNoise ? <Icons.Spinner /> : (
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+                          </svg>
+                        )}
+                        {uploadingNoise ? 'Enviando...' : 'Enviar'}
+                        <input type="file" accept="audio/*,.mp3,.wav,.ogg,.m4a,.aac,.flac" className="hidden"
+                          disabled={uploadingNoise || isAnyProcessing}
+                          onChange={(e) => {
+                            const file = e.target.files[0];
+                            if (file) {
+                              uploadCustomNoise(file, noiseNameRef.current?.value || '');
+                              e.target.value = '';
+                              if (noiseNameRef.current) noiseNameRef.current.value = '';
+                            }
+                          }}
+                        />
+                      </label>
+                    </div>
+
+                    {/* Lista de ruidos customizados */}
+                    {customNoises.length > 0 && (
+                      <div className="space-y-1">
+                        {customNoises.map(n => (
+                          <div key={n.id}
+                            className={`flex items-center gap-2 px-2.5 py-2 rounded-lg border transition-all cursor-pointer group ${selectedCustomNoise === n.id ? 'bg-emerald-500/15 border-emerald-500/40' : 'bg-dark-800/30 border-dark-700/20 hover:border-dark-600'}`}
+                            onClick={() => setSelectedCustomNoise(prev => prev === n.id ? null : n.id)}
+                          >
+                            <span className={`w-3 h-3 rounded-full border-2 flex-shrink-0 transition-all ${selectedCustomNoise === n.id ? 'bg-emerald-500 border-emerald-400' : 'border-dark-600'}`} />
+                            <div className="flex-1 min-w-0">
+                              <p className={`text-xs font-medium truncate ${selectedCustomNoise === n.id ? 'text-emerald-300' : 'text-dark-300'}`}>{n.name}</p>
+                              <p className="text-[10px] text-dark-500 truncate">{n.originalName} &middot; {(n.size / 1024).toFixed(0)}KB</p>
+                            </div>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); deleteCustomNoise(n.id); }}
+                              className="opacity-0 group-hover:opacity-100 p-1 rounded text-dark-500 hover:text-red-400 hover:bg-red-500/10 transition-all"
+                              title="Remover ruido"
+                              disabled={isAnyProcessing}
+                            >
+                              <Icons.Trash />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {customNoises.length === 0 && (
+                      <p className="text-[10px] text-dark-500 text-center py-2">Nenhum ruido cadastrado. Envie um arquivo de audio acima.</p>
+                    )}
+
+                    {selectedCustomNoise && (
+                      <p className="text-[10px] text-emerald-400/70">Ruido customizado selecionado. Os tipos de ruido sintetico abaixo serao ignorados.</p>
+                    )}
+                  </div>
+
+                  {/* Tipos de ruido sintetico */}
+                  <div className={`space-y-1.5 ${selectedCustomNoise ? 'opacity-40 pointer-events-none' : ''}`}>
+                    <div className="flex items-center justify-between">
+                      <label className="text-xs font-medium text-dark-300">Tipos de ruido sintetico {selectedCustomNoise ? '(ignorado)' : ''}</label>
+                      {!selectedCustomNoise && <span className="text-[10px] text-dark-500">Selecione 1 ou mais</span>}
                     </div>
                     <div className="grid grid-cols-5 gap-1.5">
                       {[
@@ -440,69 +614,91 @@ function App({ user, onLogout }) {
                 </div>
               )}
 
-              {/* Volume */}
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <label className="text-xs font-medium text-dark-300">Volume do {mode === 'white' ? 'Copy White' : 'Ruido'} no MID</label>
-                  <div className="flex items-center gap-1.5">
-                    <input
-                      type="number"
-                      min="0" max="100" step="0.1"
-                      value={volume}
-                      onChange={(e) => handleVolumeChange(e.target.value)}
-                      className="w-16 text-xs font-mono text-center text-indigo-400 bg-indigo-500/10 border border-indigo-500/30 rounded px-1.5 py-0.5 outline-none focus:border-indigo-500/60"
-                      disabled={isAnyProcessing}
-                    />
-                    <span className="text-xs text-dark-500">%</span>
-                  </div>
+              {/* Mixer */}
+              <div className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <Icons.Waveform />
+                  <h3 className="text-xs font-semibold text-white">Mixer</h3>
+                  <span className="text-[10px] text-dark-500 ml-auto">0 — 500%</span>
                 </div>
-                <input type="range" min="0" max="100" step="0.1" value={volume} onChange={(e) => handleVolumeChange(e.target.value)}
-                  className={sliderThumbClass + ' [&::-webkit-slider-thumb]:bg-indigo-500 [&::-webkit-slider-thumb]:shadow-indigo-500/50 [&::-webkit-slider-thumb]:hover:bg-indigo-400'}
-                  disabled={isAnyProcessing} />
-                <div className="flex justify-between text-[10px] text-dark-500">
-                  <span>0% (Sem {mode === 'white' ? 'TTS' : 'ruido'})</span>
-                  <span>100% (Volume maximo)</span>
+                <div className="bg-dark-900/50 rounded-xl p-3 border border-dark-700/30 space-y-2.5">
+                  {[
+                    { key: 'volL', label: 'L (Original)', inputClass: 'bg-cyan-500/10 border-cyan-500/20 text-cyan-400 focus:border-cyan-500/50', thumbClass: '[&::-webkit-slider-thumb]:bg-cyan-500 [&::-webkit-slider-thumb]:shadow-cyan-500/50', desc: 'Audio original no canal esquerdo. Audivel para humanos.' },
+                    { key: 'volR', label: 'R (Invertido)', inputClass: 'bg-pink-500/10 border-pink-500/20 text-pink-400 focus:border-pink-500/50', thumbClass: '[&::-webkit-slider-thumb]:bg-pink-500 [&::-webkit-slider-thumb]:shadow-pink-500/50', desc: 'Audio com fase invertida no canal direito. Cancela L quando somado em mono.' },
+                    { key: 'volNoise', label: mode === 'white' ? 'TTS (Copy White)' : 'Ruido', inputClass: 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400 focus:border-emerald-500/50', thumbClass: '[&::-webkit-slider-thumb]:bg-emerald-500 [&::-webkit-slider-thumb]:shadow-emerald-500/50', desc: mode === 'white' ? 'Volume do audio TTS que o bot vai transcrever' : 'Volume do ruido de fundo' },
+                  ].map(ch => (
+                    <div key={ch.key} className="space-y-0.5">
+                      <div className="flex items-center justify-between">
+                        <label className="text-[11px] font-medium text-dark-300" title={ch.desc}>{ch.label}</label>
+                        <div className="flex items-center gap-1">
+                          <input
+                            type="number" min="0" max="500" step="1"
+                            value={mixer[ch.key]}
+                            onChange={(e) => updateMixer(ch.key, e.target.value)}
+                            className={`w-14 text-[11px] font-mono text-center border rounded px-1 py-0.5 outline-none ${ch.inputClass}`}
+                            disabled={isAnyProcessing}
+                          />
+                          <span className="text-[10px] text-dark-500">%</span>
+                        </div>
+                      </div>
+                      <input
+                        type="range" min="0" max="500" step="1"
+                        value={mixer[ch.key]}
+                        onChange={(e) => updateMixer(ch.key, e.target.value)}
+                        className={sliderThumbClass + ' ' + ch.thumbClass}
+                        disabled={isAnyProcessing}
+                      />
+                    </div>
+                  ))}
+
+                  {/* Nivel Anti-ASR (0-5) */}
+                  <div className="pt-1.5 border-t border-dark-700/30 space-y-1">
+                    <div className="flex items-center justify-between">
+                      <label className="text-[11px] font-medium text-dark-300">Anti-ASR</label>
+                      <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${perturbLevel === 0 ? 'text-dark-500 bg-dark-800' : perturbLevel <= 2 ? 'text-green-400 bg-green-500/10' : perturbLevel <= 3 ? 'text-yellow-400 bg-yellow-500/10' : 'text-red-400 bg-red-500/10'}`}>
+                        {['Off', 'Sutil', 'Leve', 'Medio', 'Forte', 'Max'][perturbLevel]}
+                      </span>
+                    </div>
+                    <input type="range" min="0" max="5" step="1" value={perturbLevel} onChange={(e) => setPerturbLevel(parseInt(e.target.value))}
+                      className={sliderThumbClass + ' [&::-webkit-slider-thumb]:bg-orange-500 [&::-webkit-slider-thumb]:shadow-orange-500/50'}
+                      disabled={isAnyProcessing} />
+                    <p className="text-[9px] text-dark-500">Efeitos extras sobre o audio (nao afeta o cancelamento de fase). 0=Nenhum &middot; 1-2=Sutil &middot; 3=Medio &middot; 4-5=Maximo</p>
+                  </div>
+
+                  {/* Aviso L != R */}
+                  {mixer.volL !== mixer.volR && (
+                    <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg px-2.5 py-1.5">
+                      <p className="text-[10px] text-amber-400">L e R com volumes diferentes — cancelamento de fase sera parcial. Para protecao total contra bots, mantenha L = R.</p>
+                    </div>
+                  )}
+
+                  <button
+                    onClick={() => setMixer({ volL: 100, volR: 100, volNoise: 20 })}
+                    disabled={isAnyProcessing}
+                    className="w-full text-[10px] text-dark-500 hover:text-dark-300 py-1 transition-colors"
+                  >
+                    Resetar padrao
+                  </button>
                 </div>
               </div>
 
-              {/* Perturbacao */}
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <label className="text-xs font-medium text-dark-300">Perturbacao Anti-ASR</label>
-                  <span className={`text-xs font-mono px-1.5 py-0.5 rounded ${perturbLevel === 0 ? 'text-dark-500 bg-dark-800' : perturbLevel <= 2 ? 'text-green-400 bg-green-500/10' : perturbLevel <= 3 ? 'text-yellow-400 bg-yellow-500/10' : 'text-red-400 bg-red-500/10'}`}>
-                    {['Nenhuma', 'Sutil', 'Leve', 'Medio', 'Forte', 'Maximo'][perturbLevel]}
-                  </span>
-                </div>
-                <input type="range" min="0" max="5" step="1" value={perturbLevel} onChange={(e) => setPerturbLevel(parseInt(e.target.value))}
-                  className={sliderThumbClass + ' [&::-webkit-slider-thumb]:bg-orange-500 [&::-webkit-slider-thumb]:shadow-orange-500/50 [&::-webkit-slider-thumb]:hover:bg-orange-400'}
-                  disabled={isAnyProcessing} />
-                <div className="flex justify-between text-[10px] text-dark-500">
-                  <span>0 - Nenhuma</span>
-                  <span>5 - Maximo</span>
-                </div>
-                <div className="text-[10px] text-dark-500 bg-dark-900/30 rounded-lg p-2 space-y-0.5">
-                  <p><span className="text-dark-400 font-medium">Nivel 0:</span> Sem perturbacao (apenas phase split)</p>
-                  <p><span className="text-dark-400 font-medium">Nivel 1-2:</span> Echo + Chorus (quase imperceptivel)</p>
-                  <p><span className="text-dark-400 font-medium">Nivel 3:</span> + Aphaser + Tremolo (leve efeito)</p>
-                  <p><span className="text-dark-400 font-medium">Nivel 4-5:</span> + Flanger + Echo duplo (maximo anti-bot)</p>
-                </div>
-              </div>
-
-              {/* Info Phase */}
-              <div className="bg-dark-900/50 rounded-lg p-3 border border-dark-700/30 space-y-2">
-             
-                <div className="grid grid-cols-2 gap-1.5 text-[10px]">
-                  <div className="bg-dark-800/50 rounded-lg p-2 border border-dark-700/30">
-                    <p className="font-semibold text-indigo-400">Audio Principal</p>
-                    
-                    <p className="text-dark-500">Volume: 100%</p>
+              {/* Resumo */}
+              <div className="bg-dark-900/50 rounded-lg p-2.5 border border-dark-700/30">
+                <div className="grid grid-cols-3 gap-1.5 text-[9px]">
+                  <div className="bg-dark-800/50 rounded p-1.5 border border-dark-700/30 text-center">
+                    <p className="font-semibold text-cyan-400">L (Original)</p>
+                    <p className="text-dark-500">{mixer.volL}%</p>
                   </div>
-                  <div className="bg-dark-800/50 rounded-lg p-2 border border-dark-700/30">
-                    <p className="font-semibold text-purple-400">{mode === 'white' ? 'Copy White (TTS)' : 'Ruido (' + noiseTypes.join('+') + ')' + (noiseEffects.length > 0 ? ' +FX' : '')}</p>
-                  
-                    <p className="text-dark-500">Volume: {volume}%</p>
+                  <div className="bg-dark-800/50 rounded p-1.5 border border-dark-700/30 text-center">
+                    <p className="font-semibold text-pink-400">R (Invertido)</p>
+                    <p className="text-dark-500">{mixer.volR}%</p>
+                  </div>
+                  <div className="bg-dark-800/50 rounded p-1.5 border border-dark-700/30 text-center">
+                    <p className="font-semibold text-emerald-400">{mode === 'white' ? 'TTS' : 'Ruido'}</p>
+                    <p className="text-dark-500">{mixer.volNoise}%</p>
                   </div>
                 </div>
+                <p className="text-[9px] text-dark-500 text-center mt-1.5">Anti-ASR: {['Off', 'Sutil', 'Leve', 'Medio', 'Forte', 'Max'][perturbLevel]}</p>
               </div>
             </div>
           </div>
@@ -538,6 +734,26 @@ function App({ user, onLogout }) {
                 </div>
               </div>
 
+              {/* Barra de acoes em lote */}
+              {completedItems.length > 1 && (
+                <div className="flex items-center gap-2 bg-dark-800/50 rounded-xl border border-dark-700/30 px-3 py-2">
+                  <button onClick={toggleSelectAll}
+                    className={`flex items-center gap-1.5 text-[11px] font-medium px-2.5 py-1 rounded-lg border transition-all ${selectedIds.size === completedItems.length ? 'bg-indigo-500/20 border-indigo-500/40 text-indigo-300' : 'bg-dark-800 border-dark-700/30 text-dark-400 hover:border-dark-500'}`}>
+                    <span className={`w-3.5 h-3.5 rounded border-2 flex items-center justify-center flex-shrink-0 ${selectedIds.size === completedItems.length ? 'bg-indigo-500 border-indigo-400' : 'border-dark-500'}`}>
+                      {selectedIds.size === completedItems.length && <svg className="w-2.5 h-2.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>}
+                    </span>
+                    {selectedIds.size === completedItems.length ? 'Desmarcar tudo' : 'Selecionar tudo'} ({completedItems.length})
+                  </button>
+                  {selectedIds.size > 0 && (
+                    <button onClick={downloadZip} disabled={downloadingZip}
+                      className="flex items-center gap-1.5 text-[11px] font-semibold px-3 py-1 rounded-lg bg-green-500/15 border border-green-500/30 text-green-400 hover:bg-green-500/25 transition-all ml-auto disabled:opacity-50">
+                      {downloadingZip ? <Icons.Spinner /> : <Icons.Download />}
+                      {downloadingZip ? 'Gerando ZIP...' : `Baixar ${selectedIds.size} em ZIP`}
+                    </button>
+                  )}
+                </div>
+              )}
+
               {/* Fila de videos */}
               {queue.length > 0 && (
                 <div className="space-y-2 max-h-[500px] overflow-y-auto pr-1">
@@ -550,9 +766,21 @@ function App({ user, onLogout }) {
                     }`}>
                       {/* Header do item */}
                       <div className="flex items-center gap-3">
-                        <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-dark-800 flex items-center justify-center text-xs font-bold text-dark-400">
-                          {index + 1}
-                        </div>
+                        {/* Checkbox para selecao (so para concluidos) */}
+                        {item.status === 'completed' && item.outputFile ? (
+                          <button onClick={() => toggleSelect(item.id)}
+                            className={`flex-shrink-0 w-7 h-7 rounded-lg flex items-center justify-center transition-all border-2 ${selectedIds.has(item.id) ? 'bg-indigo-500 border-indigo-400' : 'bg-dark-800 border-dark-700 hover:border-dark-500'}`}>
+                            {selectedIds.has(item.id) ? (
+                              <svg className="w-3.5 h-3.5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                            ) : (
+                              <span className="text-xs font-bold text-dark-500">{index + 1}</span>
+                            )}
+                          </button>
+                        ) : (
+                          <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-dark-800 flex items-center justify-center text-xs font-bold text-dark-400">
+                            {index + 1}
+                          </div>
+                        )}
                         <div className="flex-1 min-w-0">
                           <p className="text-sm text-white truncate">{item.file.name}</p>
                           <p className="text-[10px] text-dark-500">{(item.file.size / (1024 * 1024)).toFixed(1)} MB</p>

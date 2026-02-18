@@ -9,6 +9,7 @@ import ffmpegStatic from 'ffmpeg-static';
 import ffmpeg from 'fluent-ffmpeg';
 import https from 'https';
 import { spawn } from 'child_process';
+import archiver from 'archiver';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -206,27 +207,50 @@ function buildPerturbationFilter(level) {
 }
 
 // ============================
+// RUIDOS CUSTOMIZADOS
+// ============================
+
+var noisesDir = path.join(__dirname, 'noises');
+var noisesMetaPath = path.join(noisesDir, 'noises.json');
+if (!fs.existsSync(noisesDir)) fs.mkdirSync(noisesDir, { recursive: true });
+
+function loadNoisesMetadata() {
+  try {
+    if (fs.existsSync(noisesMetaPath)) return JSON.parse(fs.readFileSync(noisesMetaPath, 'utf-8'));
+  } catch (e) { /* ignore */ }
+  return [];
+}
+
+function saveNoisesMetadata(data) {
+  fs.writeFileSync(noisesMetaPath, JSON.stringify(data, null, 2), 'utf-8');
+}
+
+// ============================
 // CONSTRUCAO DE CADEIA DE RUIDO
 // ============================
 
-// noiseTypes: string com um ou mais tipos separados por '+' ex: 'pink', 'pink+blue', 'white+brown+violet'
-// Efeitos sobre ruido disponiveis (via noiseEffects array): bandpass, vibrato, tremolo, pulsate
 function buildNoiseChain(noiseConfig, volumeDecimal) {
-  // noiseConfig pode ser:
-  //   - string simples: 'pink'
-  //   - combinacao: 'pink+blue'
-  //   - objeto serializado JSON: '{"types":["pink","blue"],"effects":["bandpass","vibrato"]}'
   var noiseTypes = [];
   var noiseEffects = [];
+  var customNoiseId = null;
 
   if (typeof noiseConfig === 'string') {
     try {
       var parsed = JSON.parse(noiseConfig);
       noiseTypes = parsed.types || ['pink'];
       noiseEffects = parsed.effects || [];
+      customNoiseId = parsed.customNoise || null;
     } catch (e) {
-      // string simples como 'pink' ou 'pink+blue'
       noiseTypes = noiseConfig.split('+').map(function(s) { return s.trim(); });
+    }
+  }
+
+  // Se tem ruido customizado, retornar info para processVideo montar o filtro
+  if (customNoiseId) {
+    var noises = loadNoisesMetadata();
+    var found = noises.find(function(n) { return n.id === customNoiseId; });
+    if (found && fs.existsSync(path.join(noisesDir, found.filename))) {
+      return { customFile: path.join(noisesDir, found.filename), volumeDecimal: volumeDecimal, effects: noiseEffects };
     }
   }
 
@@ -241,21 +265,17 @@ function buildNoiseChain(noiseConfig, volumeDecimal) {
   var ampPerNoise = volumeDecimal / noiseTypes.length;
 
   if (noiseTypes.length === 1) {
-    // Um unico ruido
     filters.push('anoisesrc=color=' + noiseTypes[0] + ':duration=7200:amplitude=' + volumeDecimal + ',aformat=channel_layouts=mono[nsingle]');
     var currentLabel = 'nsingle';
 
-    // Aplicar efeitos sobre o ruido
     var effectResult = applyNoiseEffects(currentLabel, noiseEffects, 's');
     if (effectResult.filters.length > 0) {
       filters = filters.concat(effectResult.filters);
       currentLabel = effectResult.outputLabel;
     }
 
-    // Split para L e R
     filters.push('[' + currentLabel + ']asplit=2[nfinal1][nfinal2]');
   } else {
-    // Multiplos ruidos - gerar cada um e mixar
     var noiseLabels = [];
     for (var i = 0; i < noiseTypes.length; i++) {
       var label = 'n' + i;
@@ -263,18 +283,15 @@ function buildNoiseChain(noiseConfig, volumeDecimal) {
       noiseLabels.push('[' + label + ']');
     }
 
-    // Mixar todos os ruidos
     filters.push(noiseLabels.join('') + 'amix=inputs=' + noiseTypes.length + ':duration=longest:dropout_transition=0,volume=' + noiseTypes.length + '.0[nmixed]');
     var currentLabel = 'nmixed';
 
-    // Aplicar efeitos sobre o ruido mixado
     var effectResult = applyNoiseEffects(currentLabel, noiseEffects, 'm');
     if (effectResult.filters.length > 0) {
       filters = filters.concat(effectResult.filters);
       currentLabel = effectResult.outputLabel;
     }
 
-    // Split para L e R
     filters.push('[' + currentLabel + ']asplit=2[nfinal1][nfinal2]');
   }
 
@@ -331,37 +348,71 @@ function applyNoiseEffects(inputLabel, effects, prefix) {
 // PROCESSAMENTO DE VIDEO
 // ============================
 
-function processVideo(inputPath, ttsPath, volume, perturbLevel, midMode, noiseType, outputPath, onProgress) {
+function processVideo(inputPath, ttsPath, volume, perturbLevel, midMode, noiseType, outputPath, onProgress, mixer) {
   return new Promise(function (resolve, reject) {
-    var volumeDecimal = volume / 100;
     var perturbation = buildPerturbationFilter(perturbLevel);
+
+    // Mixer: 3 canais simples (percentual → decimal)
+    var mx = mixer || {};
+    var volL = (mx.volL != null ? mx.volL : 100) / 100;
+    var volR = (mx.volR != null ? mx.volR : 100) / 100;
+    var volNoise = (mx.volNoise != null ? mx.volNoise : 20) / 100;
+
+    // Base para ruido gerado: amplitude baixa (0.08) * volNoise
+    // Assim 100% de Noise = amplitude 0.08 (ruido sutil), 500% = 0.40 (ruido forte)
+    var noiseBaseAmp = 0.08;
+    var generatedNoiseAmp = noiseBaseAmp * volNoise;
+
     var complexFilter;
+    var customNoiseFile = null;
+
+    var baseFilters = [
+      '[0:a]aformat=channel_layouts=mono[mono_raw]',
+      '[mono_raw]' + perturbation + '[mono_perturbed]',
+      '[mono_perturbed]asplit=2[orig][copy]',
+      '[copy]aeval=-val(0)[inv]',
+      '[orig]volume=' + volL + '[orig_vol]',
+      '[inv]volume=' + volR + '[inv_vol]'
+    ];
 
     if (midMode === 'noise') {
-      // MODO RUIDO: sem TTS, ruido(s) gerado(s) pelo FFmpeg com efeitos opcionais
-      var noiseFilters = buildNoiseChain(noiseType, volumeDecimal);
-      complexFilter = [
-        '[0:a]aformat=channel_layouts=mono[mono_raw]',
-        '[mono_raw]' + perturbation + '[mono_perturbed]',
-        '[mono_perturbed]asplit=2[orig][copy]',
-        '[copy]aeval=-val(0)[inv]',
-        noiseFilters,
-        '[orig][nfinal1]amix=inputs=2:duration=first:dropout_transition=0,volume=2.0[left]',
-        '[inv][nfinal2]amix=inputs=2:duration=first:dropout_transition=0,volume=2.0[right]',
-        '[left][right]amerge=inputs=2,aformat=channel_layouts=stereo[a_final]'
-      ].join(';\n');
+      var noiseResult = buildNoiseChain(noiseType, generatedNoiseAmp);
+
+      if (noiseResult && noiseResult.customFile) {
+        customNoiseFile = noiseResult.customFile;
+        var customEffects = noiseResult.effects || [];
+        var customFilters = ['[1:a]aformat=channel_layouts=mono,dynaudnorm=p=0.3:m=5,volume=' + volNoise + '[ncustom_raw]'];
+        var customLabel = 'ncustom_raw';
+
+        var effectResult = applyNoiseEffects(customLabel, customEffects, 'c');
+        if (effectResult.filters.length > 0) {
+          customFilters = customFilters.concat(effectResult.filters);
+          customLabel = effectResult.outputLabel;
+        }
+
+        customFilters.push('[' + customLabel + ']asplit=2[nfinal1][nfinal2]');
+
+        complexFilter = baseFilters.concat([
+          customFilters.join(';\n'),
+          '[orig_vol][nfinal1]amix=inputs=2:duration=first:dropout_transition=0,volume=2.0[left]',
+          '[inv_vol][nfinal2]amix=inputs=2:duration=first:dropout_transition=0,volume=2.0[right]',
+          '[left][right]amerge=inputs=2,aformat=channel_layouts=stereo[a_final]'
+        ]).join(';\n');
+      } else {
+        complexFilter = baseFilters.concat([
+          noiseResult,
+          '[orig_vol][nfinal1]amix=inputs=2:duration=first:dropout_transition=0,volume=2.0[left]',
+          '[inv_vol][nfinal2]amix=inputs=2:duration=first:dropout_transition=0,volume=2.0[right]',
+          '[left][right]amerge=inputs=2,aformat=channel_layouts=stereo[a_final]'
+        ]).join(';\n');
+      }
     } else {
-      // MODO WHITE: com TTS
-      complexFilter = [
-        '[0:a]aformat=channel_layouts=mono[mono_raw]',
-        '[mono_raw]' + perturbation + '[mono_perturbed]',
-        '[mono_perturbed]asplit=2[orig][copy]',
-        '[copy]aeval=-val(0)[inv]',
-        '[1:a]aformat=channel_layouts=mono,volume=' + volumeDecimal + ',asplit=2[tts1][tts2]',
-        '[orig][tts1]amix=inputs=2:duration=first:dropout_transition=0,volume=2.0[left]',
-        '[inv][tts2]amix=inputs=2:duration=first:dropout_transition=0,volume=2.0[right]',
+      complexFilter = baseFilters.concat([
+        '[1:a]aformat=channel_layouts=mono,volume=' + volNoise + ',asplit=2[tts1][tts2]',
+        '[orig_vol][tts1]amix=inputs=2:duration=first:dropout_transition=0,volume=2.0[left]',
+        '[inv_vol][tts2]amix=inputs=2:duration=first:dropout_transition=0,volume=2.0[right]',
         '[left][right]amerge=inputs=2,aformat=channel_layouts=stereo[a_final]'
-      ].join(';\n');
+      ]).join(';\n');
     }
 
     // Salvar filtro em arquivo temporario
@@ -375,7 +426,10 @@ function processVideo(inputPath, ttsPath, volume, perturbLevel, midMode, noiseTy
     var ffmpegPath = ffmpegStatic;
     var args = ['-y', '-i', inputPath];
 
-    if (midMode !== 'noise' && ttsPath) {
+    if (customNoiseFile) {
+      // Ruido customizado como input com loop infinito (para cobrir a duracao do video)
+      args.push('-stream_loop', '-1', '-i', customNoiseFile);
+    } else if (midMode !== 'noise' && ttsPath) {
       args.push('-i', ttsPath);
     }
 
@@ -461,9 +515,17 @@ app.post('/api/process', handleUpload, async function (req, res) {
     var mode = req.body.mode || 'white';
     var noiseType = req.body.noiseType || 'pink';
 
-    // noiseType agora pode ser: string simples ('pink'), combinacao ('pink+blue'),
-    // ou JSON stringificado ({"types":["pink","blue"],"effects":["bandpass","vibrato"]})
-    // Validacao e feita dentro de buildNoiseChain
+    // Mixer: volumes individuais (0-500%)
+    var mixer = {};
+    try {
+      if (req.body.mixer) mixer = JSON.parse(req.body.mixer);
+    } catch (e) { /* ignore */ }
+    var parseMixVal = function(v, def) { var n = parseFloat(v); return isNaN(n) ? def : Math.max(0, Math.min(500, n)); };
+    mixer = {
+      volL: parseMixVal(mixer.volL, 100),
+      volR: parseMixVal(mixer.volR, 100),
+      volNoise: parseMixVal(mixer.volNoise, 20)
+    };
 
     if (mode === 'white' && text.trim().length === 0) {
       fs.unlinkSync(req.file.path);
@@ -514,15 +576,19 @@ app.post('/api/process', handleUpload, async function (req, res) {
             message: 'Processando video... ' + percent + '%',
             inputFile: req.file.originalname
           });
-        }
+        },
+        mixer
       );
 
+      var originalName = path.parse(req.file.originalname).name;
+      var originalDownloadName = originalName + '.mp4';
       jobs.set(jobId, {
         status: 'completed',
         progress: 100,
         message: 'Processamento concluido!',
         outputFile: outputFilename,
-        downloadUrl: '/output/' + outputFilename
+        downloadUrl: '/output/' + outputFilename,
+        originalName: originalDownloadName
       });
 
       console.log('[Job ' + jobId + '] Concluido!');
@@ -561,6 +627,56 @@ app.get('/api/download/:filename', function (req, res) {
   res.download(filePath);
 });
 
+app.post('/api/download-zip', express.json(), function (req, res) {
+  var files = req.body.files;
+  if (!files || !Array.isArray(files) || files.length === 0) {
+    return res.status(400).json({ error: 'Nenhum arquivo selecionado.' });
+  }
+
+  // Validar que todos os arquivos existem
+  var validFiles = [];
+  for (var i = 0; i < files.length; i++) {
+    var filename = path.basename(files[i].filename || '');
+    var filePath = path.join(outputDir, filename);
+    if (fs.existsSync(filePath)) {
+      validFiles.push({ path: filePath, name: files[i].downloadName || filename });
+    }
+  }
+
+  if (validFiles.length === 0) {
+    return res.status(404).json({ error: 'Nenhum arquivo encontrado.' });
+  }
+
+  res.setHeader('Content-Type', 'application/zip');
+  res.setHeader('Content-Disposition', 'attachment; filename="criativos-wd-' + Date.now() + '.zip"');
+
+  var archive = archiver('zip', { zlib: { level: 1 } });
+  archive.on('error', function (err) {
+    console.error('[ZIP] Erro: ' + err.message);
+    if (!res.headersSent) res.status(500).json({ error: err.message });
+  });
+
+  archive.pipe(res);
+
+  // Evitar nomes duplicados
+  var usedNames = {};
+  validFiles.forEach(function (f) {
+    var name = f.name;
+    if (usedNames[name]) {
+      var ext = path.extname(name);
+      var base = path.basename(name, ext);
+      var counter = 2;
+      while (usedNames[base + '_' + counter + ext]) counter++;
+      name = base + '_' + counter + ext;
+    }
+    usedNames[name] = true;
+    archive.file(f.path, { name: name });
+  });
+
+  archive.finalize();
+  console.log('[ZIP] Gerando ZIP com ' + validFiles.length + ' arquivo(s)');
+});
+
 app.delete('/api/cleanup/:filename', function (req, res) {
   var filePath = path.join(outputDir, req.params.filename);
   try {
@@ -568,6 +684,86 @@ app.delete('/api/cleanup/:filename', function (req, res) {
     res.json({ message: 'Arquivo removido.' });
   } catch (error) {
     res.status(500).json({ error: 'Erro ao remover arquivo.' });
+  }
+});
+
+// ============================
+// API: RUIDOS CUSTOMIZADOS
+// ============================
+
+var noiseUpload = multer({
+  storage: multer.diskStorage({
+    destination: function (req, file, cb) { cb(null, noisesDir); },
+    filename: function (req, file, cb) { cb(null, uuidv4() + path.extname(file.originalname)); }
+  }),
+  limits: { fileSize: 50 * 1024 * 1024 },
+  fileFilter: function (req, file, cb) {
+    if (file.originalname.match(/\.(mp3|wav|ogg|m4a|aac|flac)$/i) || file.mimetype.startsWith('audio/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Formato de audio nao suportado. Use MP3, WAV, OGG, M4A, AAC ou FLAC.'));
+    }
+  }
+});
+
+app.get('/api/noises', function (req, res) {
+  var noises = loadNoisesMetadata();
+  res.json(noises);
+});
+
+app.post('/api/noises', function (req, res) {
+  noiseUpload.single('audio')(req, res, function (err) {
+    if (err) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({ error: 'Arquivo de audio muito grande. Limite: 50MB.' });
+      }
+      return res.status(400).json({ error: err.message || 'Erro no upload do audio.' });
+    }
+    try {
+      if (!req.file) return res.status(400).json({ error: 'Nenhum arquivo de audio enviado.' });
+      var name = (req.body.name || '').trim();
+      if (!name) {
+        name = path.parse(req.file.originalname).name;
+      }
+
+      var noises = loadNoisesMetadata();
+      var newNoise = {
+        id: uuidv4(),
+        name: name,
+        filename: req.file.filename,
+        originalName: req.file.originalname,
+        size: req.file.size,
+        createdAt: new Date().toISOString()
+      };
+      noises.push(newNoise);
+      saveNoisesMetadata(noises);
+
+      console.log('[Noise] Cadastrado: ' + name + ' (' + req.file.filename + ')');
+      res.json(newNoise);
+    } catch (error) {
+      res.status(500).json({ error: error.message });
+    }
+  });
+});
+
+app.delete('/api/noises/:id', function (req, res) {
+  try {
+    var noises = loadNoisesMetadata();
+    var found = noises.find(function(n) { return n.id === req.params.id; });
+    if (!found) return res.status(404).json({ error: 'Ruido nao encontrado.' });
+
+    // Remover arquivo
+    var filePath = path.join(noisesDir, found.filename);
+    try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch (e) { /* ignore */ }
+
+    // Remover do metadata
+    noises = noises.filter(function(n) { return n.id !== req.params.id; });
+    saveNoisesMetadata(noises);
+
+    console.log('[Noise] Removido: ' + found.name);
+    res.json({ message: 'Ruido removido.' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 

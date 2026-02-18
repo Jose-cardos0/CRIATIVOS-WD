@@ -3,4 +3,5 @@ dist/
 uploads/
 output/
 temp/
+noises/
 .env
