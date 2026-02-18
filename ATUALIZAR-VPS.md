@@ -1,3 +1,13 @@
+git checkout -- package-lock.json
+git pull origin main
+npm install --production=false
+npm run build
+pm2 restart criativos-wd
+pm2 status
+
+
+
+
 # Como atualizar o app no VPS (goldensecret.online)
 
 Quando você fizer alterações no código no seu PC e enviar para o GitHub, use este passo a passo para atualizar o app rodando na VPS.
